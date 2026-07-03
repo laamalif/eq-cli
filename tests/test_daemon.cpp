@@ -488,6 +488,61 @@ void test_stale_socket_recovery() {
   server.join();
 }
 
+void test_stalled_client_does_not_block_daemon() {
+  ee::log::info("daemon-test: stalled_client_timeout");
+  const auto temp_dir = make_temp_dir();
+  expect(temp_dir.is_valid(), "temporary runtime dir should be created");
+  if (!temp_dir.is_valid()) {
+    return;
+  }
+  auto runtime_dir_env = ScopedEnv("XDG_RUNTIME_DIR", temp_dir.path.string());
+
+  auto state = std::make_shared<FakeBackendState>();
+  std::string server_error;
+  std::thread server([&]() {
+    ee::DaemonController controller(std::make_unique<FakeBackend>(state), ee::kApplicationVersion, 1234, "2026-04-16T00:00:00Z");
+    ee::run_daemon_ipc_server(controller, server_error, false, std::chrono::milliseconds(200));
+  });
+
+  const auto socket_path = temp_dir.path / "eq-cli" / "daemon.sock";
+  expect(wait_for_socket(socket_path), "daemon socket should appear");
+  std::string ready_error;
+  expect(wait_for_status_ready(ready_error), "daemon should become ready");
+
+  // A client that connects but never sends its request.
+  const int stalled_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  expect(stalled_fd != -1, "stalled client socket should be created");
+  sockaddr_un address{};
+  address.sun_family = AF_UNIX;
+  std::strncpy(address.sun_path, socket_path.c_str(), sizeof(address.sun_path) - 1);
+  expect(connect(stalled_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0,
+         "stalled client should connect");
+
+  ee::DaemonResponse response;
+  std::string error;
+  expect(ee::send_daemon_request(ee::DaemonRequest{.command = "status"}, response, error) && response.ok,
+         "status should succeed while another client stalls");
+
+  // The stalled client must have been answered with a timeout error and closed.
+  std::string stalled_payload;
+  std::array<char, 4096> buffer{};
+  while (true) {
+    const auto bytes = read(stalled_fd, buffer.data(), buffer.size());
+    if (bytes <= 0) {
+      break;
+    }
+    stalled_payload.append(buffer.data(), static_cast<size_t>(bytes));
+  }
+  close(stalled_fd);
+  expect(stalled_payload.find("timed out") != std::string::npos,
+         "stalled client should receive a timeout error response");
+
+  ee::DaemonResponse ignored;
+  expect(ee::send_daemon_request(ee::DaemonRequest{.command = "shutdown"}, ignored, error),
+         "shutdown should succeed after a stalled client");
+  server.join();
+}
+
 void test_switch_sink() {
   ee::log::info("daemon-test: switch_sink");
   auto harness = start_daemon_harness();
@@ -981,6 +1036,7 @@ int main() {
   test_bypass_survives_switch_sink();
   test_daemon_single_instance_refusal();
   test_stale_socket_recovery();
+  test_stalled_client_does_not_block_daemon();
   test_full_lifecycle();
   test_invalid_preset_no_replace();
   test_apply_rollback_failure();

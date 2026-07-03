@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <climits>
 #include <csignal>
 #include <cstdlib>
@@ -111,10 +112,55 @@ auto bind_server_socket(const std::string& path, std::string& error) -> int {
   return fd;
 }
 
-auto read_request_json(int fd, DaemonRequest& request, std::string& error) -> bool {
+auto read_request_json(int fd,
+                       int signal_fd,
+                       std::chrono::milliseconds timeout,
+                       DaemonRequest& request,
+                       std::string& error) -> bool {
   std::string payload;
   std::array<char, 4096> buffer{};
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (true) {
+    // The daemon is single-threaded: a client that connects but never
+    // finishes its request must not block the accept loop (or shutdown
+    // signals) forever, so the read is bounded by a deadline and also
+    // watches the signalfd.
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+    if (remaining <= std::chrono::milliseconds::zero()) {
+      error = "timed out reading daemon request";
+      return false;
+    }
+
+    std::array<pollfd, 2> poll_fds{};
+    nfds_t poll_count = 1;
+    poll_fds[0] = {.fd = fd, .events = POLLIN, .revents = 0};
+    if (signal_fd != -1) {
+      poll_fds[1] = {.fd = signal_fd, .events = POLLIN, .revents = 0};
+      poll_count = 2;
+    }
+
+    const int poll_result = poll(poll_fds.data(), poll_count, static_cast<int>(remaining.count()));
+    if (poll_result < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      error = std::format("failed to poll daemon request: {}", std::strerror(errno));
+      return false;
+    }
+    if (poll_result == 0) {
+      error = "timed out reading daemon request";
+      return false;
+    }
+    if (signal_fd != -1 && (poll_fds[1].revents & POLLIN) != 0) {
+      // Leave the signal unread; the accept loop consumes it and shuts down.
+      error = "daemon is shutting down";
+      return false;
+    }
+    if (poll_fds[0].revents == 0) {
+      continue;
+    }
+
     const auto bytes = read(fd, buffer.data(), buffer.size());
     if (bytes == 0) {
       break;
@@ -156,7 +202,10 @@ auto daemon_socket_path(std::string& error) -> std::string {
   return daemon_socket_path_for_dir(kRuntimeDirName, error, true);
 }
 
-auto run_daemon_ipc_server(DaemonController& controller, std::string& error, const bool watch_signals) -> int {
+auto run_daemon_ipc_server(DaemonController& controller,
+                           std::string& error,
+                           const bool watch_signals,
+                           const std::chrono::milliseconds request_read_timeout) -> int {
   const auto socket_path = daemon_socket_path(error);
   if (!error.empty()) {
     return EXIT_FAILURE;
@@ -240,7 +289,7 @@ auto run_daemon_ipc_server(DaemonController& controller, std::string& error, con
       DaemonRequest request;
       std::string request_error;
       DaemonResponse response;
-      if (!read_request_json(client_fd, request, request_error)) {
+      if (!read_request_json(client_fd, signal_fd, request_read_timeout, request, request_error)) {
         response.ok = false;
         response.error = request_error;
       } else {

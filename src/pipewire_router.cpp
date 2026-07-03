@@ -1290,12 +1290,8 @@ void PipeWireRouter::stop() {
   limiter_filter_.reset();
   convolver_filter_.reset();
 
-  if (virtual_sink_proxy_ != nullptr && core_ != nullptr && thread_loop_ != nullptr) {
-    pw_thread_loop_lock(thread_loop_);
-    pw_proxy_destroy(virtual_sink_proxy_);
-    pw_core_sync(core_, PW_ID_CORE, 0);
-    pw_thread_loop_wait(thread_loop_);
-    pw_thread_loop_unlock(thread_loop_);
+  if (virtual_sink_proxy_ != nullptr) {
+    destroy_proxy_sync(virtual_sink_proxy_, nullptr);
     virtual_sink_proxy_ = nullptr;
   }
 
@@ -1324,33 +1320,16 @@ void PipeWireRouter::stop() {
     }
 
     free_node_info(node);
-    if (node->proxy_listener.link.next != nullptr || node->proxy_listener.link.prev != nullptr) {
-      spa_hook_remove(&node->proxy_listener);
-    }
-    if (node->proxy != nullptr) {
-      pw_thread_loop_lock(thread_loop_);
-      pw_proxy_destroy(node->proxy);
-      pw_core_sync(core_, PW_ID_CORE, 0);
-      pw_thread_loop_wait(thread_loop_);
-      pw_thread_loop_unlock(thread_loop_);
-    }
+    destroy_proxy_sync(node->proxy, &node->proxy_listener);
   }
 
   if (metadata_ != nullptr) {
-    pw_thread_loop_lock(thread_loop_);
-    pw_proxy_destroy(reinterpret_cast<pw_proxy*>(metadata_));
-    pw_core_sync(core_, PW_ID_CORE, 0);
-    pw_thread_loop_wait(thread_loop_);
-    pw_thread_loop_unlock(thread_loop_);
+    destroy_proxy_sync(reinterpret_cast<pw_proxy*>(metadata_), metadata_listener_.get());
     metadata_ = nullptr;
   }
 
   if (registry_ != nullptr) {
-    pw_thread_loop_lock(thread_loop_);
-    pw_proxy_destroy(reinterpret_cast<pw_proxy*>(registry_));
-    pw_core_sync(core_, PW_ID_CORE, 0);
-    pw_thread_loop_wait(thread_loop_);
-    pw_thread_loop_unlock(thread_loop_);
+    destroy_proxy_sync(reinterpret_cast<pw_proxy*>(registry_), registry_listener_.get());
     registry_ = nullptr;
   }
 
@@ -1790,19 +1769,31 @@ void PipeWireRouter::clear_patched_streams() {
   }
 }
 
-void PipeWireRouter::destroy_links() {
-  for (auto& link : created_links_) {
-    if (link == nullptr || link->proxy == nullptr || core_ == nullptr || thread_loop_ == nullptr) {
-      continue;
-    }
-    if (link->listener.link.next != nullptr || link->listener.link.prev != nullptr) {
-      spa_hook_remove(&link->listener);
-    }
-    pw_thread_loop_lock(thread_loop_);
-    pw_proxy_destroy(link->proxy);
+// Detaching a hook is only safe while the PW thread cannot be mid-dispatch
+// on the same hook list, so both the removal and the proxy destroy happen
+// under the thread-loop lock. Callers must not hold state_mutex_ (lock order
+// is loop lock -> state_mutex_, matching PW-thread callbacks).
+void PipeWireRouter::destroy_proxy_sync(pw_proxy* proxy, spa_hook* hook) {
+  if (thread_loop_ == nullptr) {
+    return;  // loop never started; nothing can be dispatching
+  }
+  pw_thread_loop_lock(thread_loop_);
+  if (hook != nullptr && (hook->link.next != nullptr || hook->link.prev != nullptr)) {
+    spa_hook_remove(hook);
+  }
+  if (proxy != nullptr && core_ != nullptr) {
+    pw_proxy_destroy(proxy);
     pw_core_sync(core_, PW_ID_CORE, 0);
     pw_thread_loop_wait(thread_loop_);
-    pw_thread_loop_unlock(thread_loop_);
+  }
+  pw_thread_loop_unlock(thread_loop_);
+}
+
+void PipeWireRouter::destroy_links() {
+  for (auto& link : created_links_) {
+    if (link != nullptr) {
+      destroy_proxy_sync(link->proxy, &link->listener);
+    }
   }
   created_links_.clear();
 }

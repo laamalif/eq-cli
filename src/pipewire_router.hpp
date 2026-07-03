@@ -158,6 +158,7 @@ class PipeWireRouter {
   void patch_stream(uint64_t node_serial);
   void clear_patched_streams();
   void destroy_links();
+  void destroy_proxy_sync(pw_proxy* proxy, spa_hook* hook);
   auto wait_for_links_ready(std::string& error) -> bool;
   void reconnect_to_sink(const std::string& new_sink_name);
 

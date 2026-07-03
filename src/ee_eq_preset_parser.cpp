@@ -384,19 +384,9 @@ auto parse_autoeq_filter_line(const std::string& line,
   return true;
 }
 
-}  // namespace
-
-auto parse_easy_effects_preset(std::string_view bytes, std::string& error) -> ParsedPreset {
+auto parse_easy_effects_preset_json(const nlohmann::json& json, std::string& error) -> ParsedPreset {
   ParsedPreset parsed;
   EqPreset& preset = parsed.equalizer;
-
-  nlohmann::json json;
-  try {
-    json = nlohmann::json::parse(bytes.begin(), bytes.end());
-  } catch (const std::exception& e) {
-    error = std::format("invalid preset JSON: {}", e.what());
-    return {};
-  }
 
   if (!json.contains("output") || !json.at("output").is_object()) {
     error = "missing output section";
@@ -517,6 +507,26 @@ auto parse_easy_effects_preset(std::string_view bytes, std::string& error) -> Pa
   }
 
   return parsed;
+}
+
+}  // namespace
+
+auto parse_easy_effects_preset(std::string_view bytes, std::string& error) -> ParsedPreset {
+  nlohmann::json json;
+  try {
+    json = nlohmann::json::parse(bytes.begin(), bytes.end());
+  } catch (const std::exception& e) {
+    error = std::format("invalid preset JSON: {}", e.what());
+    return {};
+  }
+
+  try {
+    return parse_easy_effects_preset_json(json, error);
+  } catch (const nlohmann::json::exception& e) {
+    // value()/get() throw on fields present with the wrong JSON type.
+    error = std::format("invalid preset structure: {}", e.what());
+    return {};
+  }
 }
 
 auto parse_autoeq_preset(std::string_view text, std::string& error) -> ParsedPreset {

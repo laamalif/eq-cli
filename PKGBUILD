@@ -1,7 +1,7 @@
 # Maintainer: local
 
 pkgname=eq-cli
-pkgver=0.3.2.1
+pkgver=0.3.2.2
 pkgrel=1
 pkgdesc='Headless PipeWire DSP runner for EasyEffects-compatible presets (EQ, convolver, limiter)'
 arch=(x86_64 aarch64)

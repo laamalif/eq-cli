@@ -693,6 +693,27 @@ void test_parse_split_channels() {
   expect(parsed.equalizer.right[0].gain_db == -3.0, "right band0 gain should be -3.0");
 }
 
+void test_parse_wrong_typed_fields_return_error() {
+  // Wrong-typed fields must produce a parse error, not an uncaught
+  // nlohmann::json exception (which would terminate the daemon).
+  constexpr std::array<std::string_view, 4> presets = {
+      // non-string entry in plugins_order
+      R"({"output": {"plugins_order": ["equalizer", 3], "equalizer": {"left": {}, "right": {}}}})",
+      // equalizer payload is not an object
+      R"({"output": {"plugins_order": ["equalizer"], "equalizer": 42}})",
+      // scalar field present with the wrong type
+      R"({"output": {"plugins_order": ["equalizer"], "equalizer": {"input-gain": "0", "left": {}, "right": {}}}})",
+      // wrong-typed field nested in a band
+      R"({"output": {"plugins_order": ["equalizer"], "equalizer": {"left": {"band0": {"gain": "5"}}, "right": {}}}})",
+  };
+  for (const auto preset_json : presets) {
+    std::string error;
+    const auto parsed = ee::parse_easy_effects_preset(preset_json, error);
+    expect(!error.empty(), std::format("wrong-typed preset should produce an error: {}", preset_json));
+    expect(parsed.plugin_order.empty(), "wrong-typed preset should return an empty result");
+  }
+}
+
 // --- Convolver tests with real IRS ---
 
 void test_convolver_load_real_irs() {
@@ -908,6 +929,7 @@ int main() {
   test_parse_num_bands_clamped_high();
   test_parse_num_bands_clamped_low();
   test_parse_split_channels();
+  test_parse_wrong_typed_fields_return_error();
 
   test_convolver_load_real_irs();
   test_convolver_process_round_trip();

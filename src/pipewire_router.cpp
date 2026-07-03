@@ -1871,8 +1871,13 @@ void PipeWireRouter::reconnect_to_sink(const std::string& new_sink_name) {
   if (!connect_chain(error)) {
     log::error(std::format("failed to reconnect chain to {}: {}", new_sink_name, error));
     destroy_links();
-    std::scoped_lock lock(state_mutex_);
-    selected_sink_ = old_sink;
+    {
+      // Release state_mutex_ before connect_chain/patch_existing_streams:
+      // holding it across pw_thread_loop_wait deadlocks against PW-thread
+      // callbacks that acquire state_mutex_ under the loop lock.
+      std::scoped_lock lock(state_mutex_);
+      selected_sink_ = old_sink;
+    }
     std::string rollback_error;
     if (connect_chain(rollback_error) && wait_for_links_ready(rollback_error)) {
       log::warn(std::format("rolled back to previous sink: {}", old_sink.name));
@@ -1886,9 +1891,11 @@ void PipeWireRouter::reconnect_to_sink(const std::string& new_sink_name) {
   if (!wait_for_links_ready(error)) {
     log::error(std::format("chain links failed to negotiate for {}: {}", new_sink_name, error));
     destroy_links();
-    // Rollback to old sink
-    std::scoped_lock lock(state_mutex_);
-    selected_sink_ = old_sink;
+    // Rollback to old sink; see the lock-scope note in the block above.
+    {
+      std::scoped_lock lock(state_mutex_);
+      selected_sink_ = old_sink;
+    }
     std::string rollback_error;
     if (connect_chain(rollback_error) && wait_for_links_ready(rollback_error)) {
       log::warn(std::format("rolled back to previous sink: {}", old_sink.name));
